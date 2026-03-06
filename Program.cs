@@ -42,12 +42,13 @@ else
 
 app.MapGet("/api/health", () => Results.Ok(new { ok = true }));
 
-app.MapPost("/api/game/start", async (LlmGameClient llm, GameSessionStore store) =>
+app.MapPost("/api/game/start", async (StartRequest request, LlmGameClient llm, GameSessionStore store) =>
 {
-    var session = store.CreateSession();
+    var language = NormalizeLanguage(request.Language);
+    var session = store.CreateSession(language);
     try
     {
-        var turn = await llm.NextTurnAsync(session.Messages);
+        var turn = await llm.NextTurnAsync(session.Messages, session.Language);
         session.ApplyTurn(turn);
         return Results.Ok(ToTurnDto(session, turn));
     }
@@ -77,7 +78,7 @@ app.MapPost("/api/game/turn", async (TurnRequest request, LlmGameClient llm, Gam
 
     try
     {
-        var turn = await llm.NextTurnAsync(session.Messages);
+        var turn = await llm.NextTurnAsync(session.Messages, session.Language);
         session.ApplyTurn(turn);
 
         if (session.IsFinished)
@@ -95,6 +96,16 @@ app.MapPost("/api/game/turn", async (TurnRequest request, LlmGameClient llm, Gam
 });
 
 app.Run();
+
+static string NormalizeLanguage(string? language)
+{
+    var value = language?.Trim().ToLowerInvariant();
+    return value switch
+    {
+        "spanish" or "es" or "espanol" or "español" => "spanish",
+        _ => "english"
+    };
+}
 
 static string? FindStaticRoot(string contentRoot, string baseDir)
 {
@@ -133,6 +144,8 @@ static TurnResponse ToTurnDto(GameSession session, GameTurnResponse turn)
     var status = session.IsTimeOut ? "lose" : turn.Status ?? "ongoing";
     var endingLabel = status switch
     {
+        "win" when session.Language == "spanish" => "FINAL DE VICTORIA",
+        "lose" when session.Language == "spanish" => "FINAL DE DERROTA",
         "win" => "SUCCESS ENDING",
         "lose" => "FAILURE ENDING",
         _ => null
@@ -140,6 +153,7 @@ static TurnResponse ToTurnDto(GameSession session, GameTurnResponse turn)
 
     return new TurnResponse(
         SessionId: session.Id,
+        Language: session.Language,
         Title: turn.Title,
         EpisodeTitle: turn.EpisodeTitle,
         EpisodeNumber: turn.EpisodeNumber,
@@ -170,9 +184,9 @@ sealed class GameSessionStore
 {
     private readonly ConcurrentDictionary<string, GameSession> _sessions = new();
 
-    public GameSession CreateSession()
+    public GameSession CreateSession(string language)
     {
-        var session = GameSession.Create();
+        var session = GameSession.Create(language);
         _sessions[session.Id] = session;
         return session;
     }
@@ -186,13 +200,15 @@ sealed class GameSessionStore
 
 sealed class GameSession
 {
-    private GameSession(string id, List<ChatMessage> messages)
+    private GameSession(string id, List<ChatMessage> messages, string language)
     {
         Id = id;
         Messages = messages;
+        Language = language;
     }
 
     public string Id { get; }
+    public string Language { get; }
     public List<ChatMessage> Messages { get; }
     public string LastAssistantJson { get; private set; } = "{}";
     public int TurnCount { get; private set; }
@@ -200,15 +216,15 @@ sealed class GameSession
     public bool IsTimeOut { get; private set; }
     public bool IsFinished { get; private set; }
 
-    public static GameSession Create()
+    public static GameSession Create(string language)
     {
         var seed = Guid.NewGuid().ToString("N");
         var messages = new List<ChatMessage>
         {
-            ChatMessage.System(Prompts.SystemPrompt),
-            ChatMessage.User(Prompts.StartPrompt(seed))
+            ChatMessage.System(Prompts.SystemPrompt(language)),
+            ChatMessage.User(Prompts.StartPrompt(seed, language))
         };
-        return new GameSession(Guid.NewGuid().ToString("N"), messages);
+        return new GameSession(Guid.NewGuid().ToString("N"), messages, language);
     }
 
     public void ApplyTurn(GameTurnResponse response)
@@ -258,7 +274,7 @@ sealed class LlmGameClient
         _endpoint = $"{baseUrl.TrimEnd('/')}/chat/completions";
     }
 
-    public async Task<GameTurnResponse> NextTurnAsync(List<ChatMessage> messages)
+    public async Task<GameTurnResponse> NextTurnAsync(List<ChatMessage> messages, string language)
     {
         if (string.IsNullOrWhiteSpace(_apiKey))
         {
@@ -292,10 +308,10 @@ sealed class LlmGameClient
             throw new InvalidOperationException("LLM returned no content.");
         }
 
-        return ParseGameResponse(content);
+        return ParseGameResponse(content, language);
     }
 
-    private static GameTurnResponse ParseGameResponse(string content)
+    private static GameTurnResponse ParseGameResponse(string content, string language)
     {
         var jsonText = ExtractJsonObject(content);
         try
@@ -312,14 +328,17 @@ sealed class LlmGameClient
         }
         catch
         {
+            var isSpanish = language == "spanish";
             return new GameTurnResponse
             {
                 Title = null,
-                EpisodeTitle = "Unwritten Paths",
+                EpisodeTitle = isSpanish ? "Caminos Inciertos" : "Unwritten Paths",
                 EpisodeNumber = 1,
                 Scene = content.Trim(),
                 Status = "ongoing",
-                ChoicesHint = new List<string> { "strike", "parley", "explore the ruins" },
+                ChoicesHint = isSpanish
+                    ? new List<string> { "atacar", "negociar", "explorar las ruinas" }
+                    : new List<string> { "strike", "parley", "explore the ruins" },
                 TurnsRemaining = 4,
                 RawAssistantText = content
             };
@@ -352,7 +371,7 @@ sealed class LlmGameClient
 
 static class Prompts
 {
-    public const string SystemPrompt = """
+    public static string SystemPrompt(string language) => $$"""
 You are the game engine for a short episodic fantasy RPG.
 Generate a fresh, random story each playthrough. Use the player's free-text actions to branch the plot.
 
@@ -369,6 +388,8 @@ Rules:
 - Every response MUST be valid JSON object only.
 - Include meaningful win or lose outcome based on player choices.
 - Do not reveal hidden future events unless discovered.
+- Output language: {{(language == "spanish" ? "Spanish" : "English")}}.
+- Keep JSON keys in English exactly as specified.
 
 Output JSON schema:
 {
@@ -385,8 +406,10 @@ Set "title" only on first turn, otherwise null.
 When status is win or lose, provide a clear ending in "scene".
 """;
 
-    public static string StartPrompt(string seed) =>
-        $"Start a new Arthus episode run with random seed {seed}. Introduce Arthus, his first quest in the wider world, and an immediate opening challenge.";
+    public static string StartPrompt(string seed, string language) =>
+        language == "spanish"
+            ? $"Comienza una nueva aventura episódica de Arthus con semilla aleatoria {seed}. Presenta a Arthus, su primera misión en el mundo real y un desafío inmediato."
+            : $"Start a new Arthus episode run with random seed {seed}. Introduce Arthus, his first quest in the wider world, and an immediate opening challenge.";
 }
 
 sealed class ChatMessage
@@ -450,10 +473,13 @@ sealed class ChatChoiceMessage
     public string? Content { get; set; }
 }
 
+sealed record StartRequest(string? Language);
+
 sealed record TurnRequest(string SessionId, string Action);
 
 sealed record TurnResponse(
     string SessionId,
+    string Language,
     string? Title,
     string EpisodeTitle,
     int EpisodeNumber,

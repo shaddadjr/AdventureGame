@@ -93,10 +93,11 @@
       border-top: 1px solid var(--border);
       padding: 14px 16px;
       display: grid;
-      grid-template-columns: 1fr auto auto;
+      grid-template-columns: 170px 1fr auto auto;
       gap: 10px;
       background: #fffaf0;
     }
+    select,
     input[type="text"] {
       width: 100%;
       padding: 11px 12px;
@@ -138,6 +139,10 @@
     <section id="log" class="log" aria-live="polite"></section>
 
     <section class="controls">
+      <select id="languageSelect" aria-label="Language">
+        <option value="english">English</option>
+        <option value="spanish">Español</option>
+      </select>
       <input id="actionInput" type="text" placeholder="Example: raise shield and challenge the bandit chief" autocomplete="off" />
       <button id="sendBtn">Send Action</button>
       <button id="newBtn">New Game</button>
@@ -149,9 +154,24 @@
     const actionInput = document.getElementById('actionInput');
     const sendBtn = document.getElementById('sendBtn');
     const newBtn = document.getElementById('newBtn');
+    const languageSelect = document.getElementById('languageSelect');
 
     let sessionId = null;
     let gameOver = false;
+    let currentLanguage = 'english';
+
+    function t(english, spanish) {
+      return currentLanguage === 'spanish' ? spanish : english;
+    }
+
+    function syncUiLanguage() {
+      sendBtn.textContent = t('Send Action', 'Enviar acción');
+      newBtn.textContent = t('New Game', 'Juego nuevo');
+      actionInput.placeholder = t(
+        'Example: raise shield and challenge the bandit chief',
+        'Ejemplo: alzar el escudo y desafiar al jefe bandido'
+      );
+    }
 
     function addEntry(type, title, text, meta = "") {
       const item = document.createElement('article');
@@ -186,16 +206,26 @@
     function setGameOver(status, endingLabel) {
       gameOver = status === 'win' || status === 'lose';
       if (gameOver) {
-        addEntry('system', endingLabel ?? 'ENDING', status === 'win' ? 'Arthus wins this run.' : 'Arthus fails this run.');
+        addEntry(
+          'system',
+          endingLabel ?? t('ENDING', 'FINAL'),
+          status === 'win'
+            ? t('Arthus wins this run.', 'Arthus gana esta aventura.')
+            : t('Arthus fails this run.', 'Arthus fracasa en esta aventura.')
+        );
         sendBtn.disabled = true;
         actionInput.disabled = true;
       }
     }
 
     function formatTurn(turn) {
+      currentLanguage = turn.language || currentLanguage;
+      syncUiLanguage();
       const title = turn.title ? `${turn.title} - Episode ${turn.episodeNumber}: ${turn.episodeTitle}` : `Episode ${turn.episodeNumber}: ${turn.episodeTitle}`;
       const hints = (turn.choicesHint || []).join(' | ');
-      const meta = turn.status === 'ongoing' ? `Turns left: ${turn.turnsRemaining}${hints ? ` | Try: ${hints}` : ''}` : `Status: ${turn.status}`;
+      const meta = turn.status === 'ongoing'
+        ? `${t('Turns left', 'Turnos restantes')}: ${turn.turnsRemaining}${hints ? ` | ${t('Try', 'Prueba')}: ${hints}` : ''}`
+        : `${t('Status', 'Estado')}: ${turn.status}`;
       addEntry('system', title, turn.scene, meta);
       setGameOver(turn.status, turn.endingLabel);
     }
@@ -203,20 +233,22 @@
     async function startGame() {
       setBusy(true);
       gameOver = false;
+      currentLanguage = languageSelect.value || 'english';
+      syncUiLanguage();
       log.innerHTML = '';
-      addEntry('system', 'Starting...', 'Summoning a fresh tale for Arthus.');
+      addEntry('system', t('Starting...', 'Iniciando...'), t('Summoning a fresh tale for Arthus.', 'Invocando una nueva historia de Arthus.'));
 
       try {
         const response = await fetch('/api/game/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: '{}'
+          body: JSON.stringify({ language: currentLanguage })
         });
         const data = await response.json();
         log.innerHTML = '';
 
         if (!response.ok) {
-          addEntry('system', 'Error', data.error || 'Could not start game.');
+          addEntry('system', t('Error', 'Error'), data.error || t('Could not start game.', 'No se pudo iniciar el juego.'));
           return;
         }
 
@@ -224,7 +256,7 @@
         formatTurn(data);
       } catch {
         log.innerHTML = '';
-        addEntry('system', 'Error', 'Network error while starting game.');
+        addEntry('system', t('Error', 'Error'), t('Network error while starting game.', 'Error de red al iniciar el juego.'));
       } finally {
         setBusy(false);
         if (!gameOver) actionInput.focus();
@@ -237,7 +269,7 @@
       const action = actionInput.value.trim();
       if (!action) return;
 
-      addEntry('player', 'Arthus Acts', action);
+      addEntry('player', t('Arthus Acts', 'Arthus actúa'), action);
       actionInput.value = '';
       setBusy(true);
 
@@ -250,7 +282,7 @@
 
         const data = await response.json();
         if (!response.ok) {
-          addEntry('system', 'Error', data.error || 'Action failed. Start a new game.');
+          addEntry('system', t('Error', 'Error'), data.error || t('Action failed. Start a new game.', 'La acción falló. Inicia un juego nuevo.'));
           gameOver = true;
           sendBtn.disabled = true;
           actionInput.disabled = true;
@@ -259,7 +291,7 @@
 
         formatTurn(data);
       } catch {
-        addEntry('system', 'Error', 'Network error while sending action.');
+        addEntry('system', t('Error', 'Error'), t('Network error while sending action.', 'Error de red al enviar la acción.'));
       } finally {
         setBusy(false);
         if (!gameOver) actionInput.focus();
@@ -268,10 +300,15 @@
 
     sendBtn.addEventListener('click', sendAction);
     newBtn.addEventListener('click', startGame);
+    languageSelect.addEventListener('change', () => {
+      currentLanguage = languageSelect.value || 'english';
+      syncUiLanguage();
+    });
     actionInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') sendAction();
     });
 
+    syncUiLanguage();
     startGame();
   </script>
 </body>

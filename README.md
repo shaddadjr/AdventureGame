@@ -53,6 +53,7 @@ Then deploy and share the public Render URL with your friends.
 ## Behavior
 
 - Every run is a fresh story with Arthus as the hero.
+- Players can choose English or Spanish at game start.
 - Players type free-text actions to branch the plot.
 - Sessions are short (about 4 to 7 turns).
 - Story text is concise for middle-to-high-school readability.
