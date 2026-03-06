@@ -6,11 +6,9 @@ services:
     autoDeploy: true
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    dockerCommand: sh -c 'ASPNETCORE_URLS=http://0.0.0.0:$PORT dotnet BreakroomAdventure.dll'
+    dockerCommand: dotnet BreakroomAdventure.dll
     healthCheckPath: /api/health
     envVars:
-      - key: PORT
-        value: "10000"
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL
