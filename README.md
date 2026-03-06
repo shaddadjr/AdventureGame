@@ -27,7 +27,7 @@ export ASPNETCORE_URLS="http://0.0.0.0:8080"
 ## Run Locally
 
 ```bash
-dotnet run --project /Users/samhaddad/Documents/Codex/AdventureGame/BreakroomAdventure/BreakroomAdventure.csproj
+dotnet run --project /Users/samhaddad/Documents/Codex/AdventureGame/BreakroomAdventure.csproj
 ```
 
 Then open:
@@ -41,8 +41,8 @@ This repo includes a Render Blueprint file: `render.yaml`.
 
 1. Push this folder to GitHub.
 2. In Render, choose **New +** -> **Blueprint**.
-3. Connect your repo and select this project folder.
-4. Render will detect `render.yaml` and create the web service.
+3. Connect your repo.
+4. Render will detect the root `render.yaml` and create the web service.
 5. In the service environment variables, set:
    - `OPENAI_API_KEY` (required secret)
    - `OPENAI_MODEL` (defaults to `gpt-5-mini`)
