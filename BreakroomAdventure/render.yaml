@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: chronicles-of-arthus
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: sh -c 'ASPNETCORE_URLS=http://0.0.0.0:$PORT dotnet BreakroomAdventure.dll'
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
+      - key: OPENAI_BASE_URL
+        value: https://api.openai.com/v1
