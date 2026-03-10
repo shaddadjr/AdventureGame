@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.FileProviders;
 
 var renderPort = Environment.GetEnvironmentVariable("PORT");
@@ -11,6 +12,8 @@ if (!string.IsNullOrWhiteSpace(renderPort) &&
 {
     Environment.SetEnvironmentVariable("ASPNETCORE_URLS", $"http://0.0.0.0:{renderPort}");
 }
+
+var sseJsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -59,6 +62,38 @@ app.MapPost("/api/game/start", async (StartRequest request, LlmGameClient llm, G
     }
 });
 
+app.MapPost("/api/game/start-stream", async (HttpContext context, StartRequest request, LlmGameClient llm, GameSessionStore store) =>
+{
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+    context.Response.Headers.Connection = "keep-alive";
+
+    var language = NormalizeLanguage(request.Language);
+    var session = store.CreateSession(language);
+
+    try
+    {
+        var turn = await llm.StreamTurnAsync(
+            session.Messages,
+            session.Language,
+            async delta => await WriteSseAsync(context.Response, "chunk", new { text = delta }, context.RequestAborted),
+            context.RequestAborted);
+
+        session.ApplyTurn(turn);
+        await WriteSseAsync(context.Response, "done", ToTurnDto(session, turn), context.RequestAborted);
+
+        if (session.IsFinished)
+        {
+            store.RemoveSession(session.Id);
+        }
+    }
+    catch (Exception ex)
+    {
+        store.RemoveSession(session.Id);
+        await WriteSseAsync(context.Response, "error", new { error = ex.Message }, context.RequestAborted);
+    }
+});
+
 app.MapPost("/api/game/turn", async (TurnRequest request, LlmGameClient llm, GameSessionStore store) =>
 {
     if (string.IsNullOrWhiteSpace(request.SessionId) || !store.TryGetSession(request.SessionId, out var session))
@@ -95,6 +130,52 @@ app.MapPost("/api/game/turn", async (TurnRequest request, LlmGameClient llm, Gam
     }
 });
 
+app.MapPost("/api/game/turn-stream", async (HttpContext context, TurnRequest request, LlmGameClient llm, GameSessionStore store) =>
+{
+    context.Response.Headers.ContentType = "text/event-stream";
+    context.Response.Headers.CacheControl = "no-cache";
+    context.Response.Headers.Connection = "keep-alive";
+
+    if (string.IsNullOrWhiteSpace(request.SessionId) || !store.TryGetSession(request.SessionId, out var session))
+    {
+        await WriteSseAsync(context.Response, "error", new { error = "Invalid or expired session. Start a new game." }, context.RequestAborted);
+        return;
+    }
+
+    if (session.IsFinished)
+    {
+        store.RemoveSession(session.Id);
+        await WriteSseAsync(context.Response, "error", new { error = "This game is finished. Start a new game." }, context.RequestAborted);
+        return;
+    }
+
+    var userAction = string.IsNullOrWhiteSpace(request.Action) ? "wait and observe" : request.Action.Trim();
+    session.Messages.Add(ChatMessage.Assistant(session.LastAssistantJson));
+    session.Messages.Add(ChatMessage.User(userAction));
+
+    try
+    {
+        var turn = await llm.StreamTurnAsync(
+            session.Messages,
+            session.Language,
+            async delta => await WriteSseAsync(context.Response, "chunk", new { text = delta }, context.RequestAborted),
+            context.RequestAborted);
+
+        session.ApplyTurn(turn);
+        await WriteSseAsync(context.Response, "done", ToTurnDto(session, turn), context.RequestAborted);
+
+        if (session.IsFinished)
+        {
+            store.RemoveSession(session.Id);
+        }
+    }
+    catch (Exception ex)
+    {
+        store.RemoveSession(session.Id);
+        await WriteSseAsync(context.Response, "error", new { error = ex.Message }, context.RequestAborted);
+    }
+});
+
 app.Run();
 
 static string NormalizeLanguage(string? language)
@@ -105,6 +186,14 @@ static string NormalizeLanguage(string? language)
         "spanish" or "es" or "espanol" or "español" => "spanish",
         _ => "english"
     };
+}
+
+async Task WriteSseAsync<T>(HttpResponse response, string eventName, T payload, CancellationToken cancellationToken)
+{
+    var json = JsonSerializer.Serialize(payload, sseJsonOptions);
+    await response.WriteAsync($"event: {eventName}\n", cancellationToken);
+    await response.WriteAsync($"data: {json}\n\n", cancellationToken);
+    await response.Body.FlushAsync(cancellationToken);
 }
 
 static string? FindStaticRoot(string contentRoot, string baseDir)
@@ -311,6 +400,90 @@ sealed class LlmGameClient
         return ParseGameResponse(content, language);
     }
 
+    public async Task<GameTurnResponse> StreamTurnAsync(
+        List<ChatMessage> messages,
+        string language,
+        Func<string, Task> onSceneDelta,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_apiKey))
+        {
+            throw new InvalidOperationException("Missing OPENAI_API_KEY on the server.");
+        }
+
+        var payload = new
+        {
+            model = _model,
+            stream = true,
+            response_format = new { type = "json_object" },
+            messages = messages.Select(m => new { role = m.Role, content = m.Content }).ToArray()
+        };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, _endpoint);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+        request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new InvalidOperationException($"LLM request failed ({(int)response.StatusCode}): {error}");
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var reader = new StreamReader(stream);
+
+        var raw = new StringBuilder();
+        var lastScene = string.Empty;
+
+        while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var data = line[5..].Trim();
+            if (data == "[DONE]")
+            {
+                break;
+            }
+
+            ChatCompletionStreamChunk? chunk;
+            try
+            {
+                chunk = JsonSerializer.Deserialize<ChatCompletionStreamChunk>(data, JsonOptions);
+            }
+            catch
+            {
+                continue;
+            }
+
+            var piece = chunk?.Choices?.FirstOrDefault()?.Delta?.Content;
+            if (string.IsNullOrEmpty(piece))
+            {
+                continue;
+            }
+
+            raw.Append(piece);
+            var sceneSoFar = TryExtractSceneFromJson(raw.ToString());
+            if (sceneSoFar.Length <= lastScene.Length || !sceneSoFar.StartsWith(lastScene, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var delta = sceneSoFar[lastScene.Length..];
+            lastScene = sceneSoFar;
+            if (!string.IsNullOrEmpty(delta))
+            {
+                await onSceneDelta(delta);
+            }
+        }
+
+        return ParseGameResponse(raw.ToString(), language);
+    }
+
     private static GameTurnResponse ParseGameResponse(string content, string language)
     {
         var jsonText = ExtractJsonObject(content);
@@ -366,6 +539,102 @@ sealed class LlmGameClient
         }
 
         return value;
+    }
+
+    private static string TryExtractSceneFromJson(string jsonText)
+    {
+        var keyIndex = jsonText.IndexOf("\"scene\"", StringComparison.Ordinal);
+        if (keyIndex < 0)
+        {
+            return string.Empty;
+        }
+
+        var colonIndex = jsonText.IndexOf(':', keyIndex);
+        if (colonIndex < 0)
+        {
+            return string.Empty;
+        }
+
+        var i = colonIndex + 1;
+        while (i < jsonText.Length && char.IsWhiteSpace(jsonText[i]))
+        {
+            i++;
+        }
+
+        if (i >= jsonText.Length || jsonText[i] != '"')
+        {
+            return string.Empty;
+        }
+
+        i++;
+        var result = new StringBuilder();
+        var escaped = false;
+        while (i < jsonText.Length)
+        {
+            var c = jsonText[i++];
+            if (escaped)
+            {
+                switch (c)
+                {
+                    case '"':
+                        result.Append('"');
+                        break;
+                    case '\\':
+                        result.Append('\\');
+                        break;
+                    case '/':
+                        result.Append('/');
+                        break;
+                    case 'b':
+                        result.Append('\b');
+                        break;
+                    case 'f':
+                        result.Append('\f');
+                        break;
+                    case 'n':
+                        result.Append('\n');
+                        break;
+                    case 'r':
+                        result.Append('\r');
+                        break;
+                    case 't':
+                        result.Append('\t');
+                        break;
+                    case 'u':
+                        if (i + 3 < jsonText.Length)
+                        {
+                            var hex = jsonText.Substring(i, 4);
+                            if (Regex.IsMatch(hex, "^[0-9a-fA-F]{4}$"))
+                            {
+                                result.Append((char)Convert.ToInt32(hex, 16));
+                                i += 4;
+                            }
+                        }
+                        break;
+                    default:
+                        result.Append(c);
+                        break;
+                }
+
+                escaped = false;
+                continue;
+            }
+
+            if (c == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                break;
+            }
+
+            result.Append(c);
+        }
+
+        return result.ToString();
     }
 }
 
@@ -468,6 +737,24 @@ sealed class ChatChoice
 }
 
 sealed class ChatChoiceMessage
+{
+    [JsonPropertyName("content")]
+    public string? Content { get; set; }
+}
+
+sealed class ChatCompletionStreamChunk
+{
+    [JsonPropertyName("choices")]
+    public List<ChatStreamChoice>? Choices { get; set; }
+}
+
+sealed class ChatStreamChoice
+{
+    [JsonPropertyName("delta")]
+    public ChatStreamDelta? Delta { get; set; }
+}
+
+sealed class ChatStreamDelta
 {
     [JsonPropertyName("content")]
     public string? Content { get; set; }

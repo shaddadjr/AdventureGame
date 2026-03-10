@@ -1,0 +1,24 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Arthus crest">
+  <defs>
+    <linearGradient id="shield" x1="256" y1="56" x2="256" y2="442" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F7E4BE"/>
+      <stop offset="1" stop-color="#B27D2F"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="256" y1="95" x2="256" y2="395" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF7E6"/>
+      <stop offset="1" stop-color="#CBB18A"/>
+    </linearGradient>
+  </defs>
+
+  <path d="M256 40C198 76 141 84 90 90V235C90 317 141 394 256 472C371 394 422 317 422 235V90C371 84 314 76 256 40Z" fill="#3B2313"/>
+  <path d="M256 56C205 88 156 96 109 101V232C109 304 153 372 256 441C359 372 403 304 403 232V101C356 96 307 88 256 56Z" fill="url(#shield)"/>
+  <path d="M256 86C214 113 174 120 136 124V229C136 289 172 347 256 406C340 347 376 289 376 229V124C338 120 298 113 256 86Z" fill="#6A4225" opacity="0.35"/>
+
+  <path d="M238 121H274V272L315 317L292 340L256 301L220 340L197 317L238 272V121Z" fill="url(#steel)" stroke="#5A412A" stroke-width="10"/>
+  <path d="M160 197L175 162L256 196L337 162L352 197L256 238L160 197Z" fill="#EFD9AF" stroke="#5A412A" stroke-width="10"/>
+
+  <circle cx="256" cy="358" r="28" fill="#7C2F1E" stroke="#F3DCA8" stroke-width="10"/>
+  <path d="M248 343L265 358L248 373" stroke="#F3DCA8" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text x="256" y="505" text-anchor="middle" fill="#F2DFBA" font-size="42" font-family="Cinzel, Georgia, serif" letter-spacing="3">ARTHUS</text>
+</svg>
